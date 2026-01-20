@@ -1,0 +1,264 @@
+---
+title: "Assignment_1"
+author: "Mingjie Wei"
+format: pdf
+editor: visual
+---
+
+## **Setup**
+
+```{r setup, include=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tidytext)
+library(ggplot2)
+library(forcats)
+library(tibble)
+library(scales)
+```
+
+```{r load-data}
+# You will need the correct file paths if you don't follow my naming conventions:
+file_a <- "../texts/A07594__Circle_of_Commerce.txt"
+file_b <- "../texts/B14801__Free_Trade.txt"
+
+# Read the raw text files into R
+text_a <- read_file(file_a)
+text_b <- read_file(file_b)
+
+# Combine into a tibble for tidytext workflows
+texts <- tibble(
+  doc_title = c("Text A", "Text B"),
+  text = c(text_a, text_b)
+)
+
+texts
+```
+
+## **Diagnostics (before stopword removal)**
+
+Create a tibble called corpus_diagnostics with one row per document that includes:
+
+• doc_title
+
+• n_chars = number of characters in each document
+
+• n_word_tokens = number of word tokens before stopword removal
+
+• n_word_types = number of unique word types after lowercasing, before stopword removal
+
+```{r diagnostics}
+chars_tbl <- texts %>%
+  mutate(n_chars = nchar(text)) %>%
+  select(doc_title, n_chars)
+
+tokens_tbl <- texts %>%
+  unnest_tokens(word, text) %>%
+  mutate(word = str_to_lower(word))
+
+token_diag_tbl <- tokens_tbl %>%
+  group_by(doc_title) %>%
+  summarise(
+    n_word_tokens = n(),
+    n_word_types  = n_distinct(word),
+    .groups = "drop"
+  )
+
+corpus_diagnostics <- chars_tbl %>%
+  left_join(token_diag_tbl, by = "doc_title")
+
+corpus_diagnostics
+```
+
+## **Tokenization, stopwords, and counting words**
+
+### 1. Stopwords
+
+```{r stopwords}
+# Start with tidytext's built-in stopword list
+data("stop_words")
+
+# Add our own project-specific stopwords (you can, and will, expand this list later)
+custom_stopwords <- tibble(
+  word = c(
+    "vnto", "haue", "doo", "hath", "bee", "ye", "thee"
+  )
+)
+
+all_stopwords <- bind_rows(stop_words, custom_stopwords) %>%
+  distinct(word)
+
+all_stopwords %>% slice(1:10)
+```
+
+### 2. **Tokenization**
+
+```{r tokenization}
+word_counts <- texts %>%
+  unnest_tokens(word, text) %>%
+  mutate(word = str_to_lower(word)) %>%
+  anti_join(all_stopwords, by = "word") %>%
+  count(doc_title, word, sort = TRUE)
+
+word_counts
+```
+
+## **Normalize word frequencies (after stopword removal)**
+
+```{r normalize}
+doc_lengths <- word_counts %>%
+  group_by(doc_title) %>%
+  summarise(total_words = sum(n), .groups = "drop")
+
+word_counts_normalized <- word_counts %>%
+  left_join(doc_lengths, by = "doc_title") %>%
+  mutate(relative_freq = n / total_words)
+
+# Compare "trade"
+word_counts_normalized %>%
+  filter(word == "trade") %>%
+  select(doc_title, n, total_words, relative_freq)
+```
+
+## **Comparing word frequencies across texts**
+
+```{r plot}
+plot_n_words <- 20
+
+word_comparison_tbl <- word_counts_normalized %>%
+  select(doc_title, word, relative_freq) %>%
+  pivot_wider(
+    names_from = doc_title,
+    values_from = relative_freq,
+    values_fill = 0
+  ) %>%
+  mutate(max_rf = pmax(`Text A`, `Text B`)) %>%
+  arrange(desc(max_rf))
+
+word_plot_data <- word_comparison_tbl %>%
+  slice_head(n = plot_n_words) %>%
+  pivot_longer(
+    cols = c(`Text A`, `Text B`),
+    names_to = "doc_title",
+    values_to = "relative_freq"
+  ) %>%
+  mutate(word = fct_reorder(word, relative_freq, .fun = max))
+
+ggplot(word_plot_data, aes(x = relative_freq, y = word)) +
+  geom_col() +
+  facet_wrap(~ doc_title, scales = "free_x") +
+  labs(
+    title = "Most frequent words (normalized; stopwords removed)",
+    subtitle = paste0(
+      "Top ", plot_n_words,
+      " words by maximum relative frequency across both texts"
+    ),
+    x = "Relative frequency (n / total_words)",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+## **Bigrams: starting to think about context**
+
+-   bigrams
+
+```{r}
+bigrams <- texts %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigrams
+```
+
+-   `separate()` takes the bigram column and splits each string at the space character.
+
+```{r}
+bigrams_separated <- bigrams %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ")
+
+bigrams_separated
+```
+
+-   remove `all_stopwords` (we remove bigrams where *either* word is a stopword, since phrases like “of the” or “and the” are rarely meaningful analytically.)
+
+```{r}
+bigrams_filtered <- bigrams_separated %>%
+  filter(
+    !word1 %in% all_stopwords$word,
+    !word2 %in% all_stopwords$word
+  )
+
+bigrams_filtered
+```
+
+-   group by + count
+
+```{r}
+bigram_counts <- bigrams_filtered %>%
+  count(doc_title, word1, word2, sort = TRUE)
+
+bigram_counts
+```
+
+-   Now that we removed the stopwords, we can use `unite` to put the bigrams back together
+
+```{r}
+bigram_counts <- bigram_counts %>%
+  unite(bigram, word1, word2, sep = " ")
+
+bigram_counts
+```
+
+## **Comparing bigrams**
+
+-   normalize by the number of bigrams *within* each document to compare the two + transposition
+
+```{r}
+bigram_relative <- bigram_counts %>%
+  group_by(doc_title) %>%
+  mutate(
+    total_bigrams = sum(n),
+    proportion = n / total_bigrams
+  ) %>%
+  ungroup()
+
+bigram_wide <- bigram_relative %>%
+  select(doc_title, bigram, proportion) %>%
+  pivot_wider(
+    names_from = doc_title,
+    values_from = proportion,
+    values_fill = 0
+  )
+
+bigram_wide
+```
+
+-   We now want to know which bigram is most characteristic of “Text A” (*The Circle of Commerce*) [relative to]{.underline} “Text B” (*Free Trade*).
+
+```{r}
+bigram_diff <- bigram_wide %>%
+  mutate(
+    diff = `Text A` - `Text B`
+  ) %>%
+  arrange(desc(abs(diff)))
+
+bigram_diff %>% slice(1:20)
+```
+
+## Canvas response
+
+### II
+
+Text A has 191,605 characters and 33,889 word tokens, while Text B has 114,211 characters and 19,922 word tokens. Text A is therefore about 1.7× longer than Text B by both characters and tokens, so the two texts are not directly comparable using raw word counts. Text A also has more unique word types (4,773 vs 3,332), which is consistent with it being longer and covering more total vocabulary. Because of the length difference, raw counts (e.g., “trade = 232 vs 185”) can be misleading: higher counts may simply reflect more text rather than greater emphasis. Normalizing by document length (e.g., using relative frequency) makes comparisons fairer by focusing on proportions instead of totals.
+
+### III
+
+**Q1: Who proportionally uses “trade” more? Does it match raw counts?**
+
+In raw counts, Text A uses “trade” more often (232 vs 185). However, after normalizing by document length (n / total_words after stopword removal), Text B uses “trade” more proportionally (0.0231 vs 0.0158), about 1.46× higher. This shows that raw counts can be driven by overall document length rather than emphasis.
+
+**Q2: What if you normalize by length before stopword removal?**
+
+If we normalize using total word counts before stopword removal, the denominator includes stopwords (function words). Because texts can differ in stopword density, the relative frequencies of content words like “trade” could be diluted by different amounts across texts, potentially shifting comparisons. Normalizing after stopword removal is more consistent with the object being compared (content-word frequencies), while normalizing before stopword removal better reflects overall language use including stylistic function words.
